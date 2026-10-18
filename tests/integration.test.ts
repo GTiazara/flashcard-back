@@ -132,6 +132,43 @@ describe('Authentification et sécurité HTTP', () => {
     await User.updateOne({ _id: aliceId }, { $set: { resetExpiresAt: new Date(0) } });
     await alice.post('/api/auth/reset-password').send({ token: new URL(expired.body.devResetUrl).searchParams.get('token'), password }).expect(400);
   });
+  it('production sans SMTP : reset désactivé identique, aucun jeton existant modifié ni mail', async () => {
+    const production = makeService(configuration({ NODE_ENV: 'production', SESSION_SECRET: 'x'.repeat(64), FRONTEND_URL: 'https://mnemo.example', CORS_ORIGIN: 'https://mnemo.example' }));
+    await User.updateOne({ _id: aliceId }, { $set: { resetTokenHash: 'a'.repeat(64), resetExpiresAt: new Date(Date.now() + 3600000) } });
+    const snapshot = () => User.find().select('+resetTokenHash +resetExpiresAt +verificationTokenHash +verificationExpiresAt +passwordHash +authVersion').sort({ _id: 1 }).lean();
+    const before = await snapshot();
+    const send = vi.spyOn(mail, 'sendToken');
+    try {
+      const known = await request(production.app).post('/api/auth/forgot-password').send({ email: 'ALICE@example.com' }).expect(503);
+      const absent = await request(production.app).post('/api/auth/forgot-password').send({ email: 'unknown@example.com' }).expect(503);
+      const withoutToken = await request(production.app).post('/api/auth/forgot-password').send({ email: 'bob@example.com' }).expect(503);
+      expect(known.body).toEqual({ message: 'La récupération de mot de passe est indisponible pour le moment.' });
+      expect(absent.body).toEqual(known.body);
+      expect(withoutToken.body).toEqual(known.body);
+      expect(known.body).not.toHaveProperty('devResetUrl');
+      expect(await snapshot()).toEqual(before);
+      expect(send).not.toHaveBeenCalled();
+      await request(production.app).post('/api/auth/forgot-password').send({ email: 'invalid' }).expect(400);
+    } finally { send.mockRestore(); }
+  });
+  it('production sans SMTP : inscription, connexion et invité fonctionnent sans lien de développement', async () => {
+    const production = makeService(configuration({ NODE_ENV: 'production', SESSION_SECRET: 'x'.repeat(64), FRONTEND_URL: 'https://mnemo.example', CORS_ORIGIN: 'https://mnemo.example', TRUST_PROXY: '1', REQUIRE_EMAIL_VERIFICATION: 'false' }));
+    const send = vi.spyOn(mail, 'sendToken');
+    try {
+      const registered = await request(production.app).post('/api/auth/register').set('X-Forwarded-Proto', 'https').send(credentials('nosmtp')).expect(201);
+      const loggedIn = await request(production.app).post('/api/auth/login').set('X-Forwarded-Proto', 'https').send({ email: 'nosmtp@example.com', password }).expect(200);
+      expect(loggedIn.body._id).toBe(registered.body._id);
+      const guest = await request(production.app).post('/api/auth/guest').set('X-Forwarded-Proto', 'https').send({}).expect(200);
+      expect(guest.body.isGuest).toBe(true);
+      for (const response of [registered, loggedIn, guest]) {
+        assertNoSecrets(response.body);
+        expect(response.body).not.toHaveProperty('devResetUrl');
+        expect(response.body).not.toHaveProperty('devVerificationUrl');
+        expect(response.headers['set-cookie'].some((cookie: string) => cookie.startsWith('flashcard.sid=') && cookie.includes('Secure'))).toBe(true);
+      }
+      expect(send).not.toHaveBeenCalled();
+    } finally { send.mockRestore(); }
+  });
   it('confirmation configurable sans session et consommation unique du jeton', async () => {
     const agent = request.agent(makeService(configuration({ REQUIRE_EMAIL_VERIFICATION: 'true' })).app);
     const response = await agent.post('/api/auth/register').send(credentials('charlie')).expect(201);

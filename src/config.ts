@@ -42,7 +42,7 @@ const schema = z.object({
   if (v.NODE_ENV === 'production') {
     if (v.SESSION_SECRET.length < 48 || /replace|change|example/i.test(v.SESSION_SECRET)) issue('SESSION_SECRET de production : au moins 48 caractères aléatoires, sans valeur exemple.');
     if (![v.CORS_ORIGIN, v.FRONTEND_URL].every(url => url.startsWith('https://'))) issue('HTTPS requis en production pour les origines.');
-    if (!v.SMTP_HOST) issue('SMTP_HOST est requis en production pour la récupération du compte.');
+    if (v.REQUIRE_EMAIL_VERIFICATION && !v.SMTP_HOST) issue('SMTP_HOST est requis en production lorsque REQUIRE_EMAIL_VERIFICATION=true.');
   }
 });
 

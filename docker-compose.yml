@@ -26,13 +26,14 @@ services:
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}
       AUTH_RATE_LIMIT: ${AUTH_RATE_LIMIT:-30}
       CARD_TEXT_MAX_LENGTH: ${CARD_TEXT_MAX_LENGTH:-10000}
-      # SMTP obligatoire dans la configuration production du backend.
-      SMTP_HOST: ${SMTP_HOST:?Renseigner SMTP_HOST pour la recuperation de compte}
+      # Facultatif si REQUIRE_EMAIL_VERIFICATION=false ; sans SMTP, reset indisponible (503).
+      # Confirmation obligatoire en production : SMTP_HOST et MAIL_FROM requis par le backend.
+      SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_SECURE: ${SMTP_SECURE:-false}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
-      MAIL_FROM: ${MAIL_FROM:?Renseigner MAIL_FROM}
+      MAIL_FROM: ${MAIL_FROM:-}
     networks:
       - default
       - proxy

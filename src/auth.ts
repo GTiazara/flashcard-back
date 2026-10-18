@@ -153,6 +153,10 @@ export function authRouter(config: Config) {
   });
   router.post('/forgot-password', async (req, res) => {
     const input = z.object({ email }).strict().parse(req.body);
+    // Désactivation globale avant génération de jeton ou recherche de compte.
+    if (config.NODE_ENV === 'production' && !config.SMTP_HOST) {
+      throw new HttpError(503, 'La récupération de mot de passe est indisponible pour le moment.');
+    }
     const resetToken = token();
     const user = await User.findOneAndUpdate({ email: input.email, isGuest: { $ne: true } }, {
       $set: { resetTokenHash: hash(resetToken), resetExpiresAt: new Date(Date.now() + 3600000) },

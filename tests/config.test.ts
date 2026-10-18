@@ -3,6 +3,46 @@ import { loadConfig } from '../src/config.js';
 
 const isolated = { NODE_ENV: 'test', MONGODB_URI: 'mongodb://127.0.0.1/uri_database', SESSION_SECRET: 'isolated-config-secret-at-least-32-characters' };
 
+const production = {
+  ...isolated, NODE_ENV: 'production', SESSION_SECRET: 'a'.repeat(48),
+  FRONTEND_URL: 'https://app.example.com', CORS_ORIGIN: 'https://app.example.com',
+};
+describe('SMTP facultatif sans environnement utilisateur', () => {
+  it('accepte production sans SMTP, confirmation désactivée par défaut ou explicitement', () => {
+    expect(loadConfig(production)).toMatchObject({ SMTP_HOST: '', REQUIRE_EMAIL_VERIFICATION: false });
+    expect(loadConfig({ ...production, REQUIRE_EMAIL_VERIFICATION: 'false' }).SMTP_HOST).toBe('');
+  });
+  it('exige SMTP pour la confirmation en production', () => {
+    expect(() => loadConfig({ ...production, REQUIRE_EMAIL_VERIFICATION: 'true' })).toThrow('SMTP_HOST est requis');
+    expect(loadConfig({ ...production, REQUIRE_EMAIL_VERIFICATION: 'true', SMTP_HOST: 'smtp.example.com', MAIL_FROM: 'mail@example.com' }).REQUIRE_EMAIL_VERIFICATION).toBe(true);
+  });
+  it.each(['development', 'test'])('autorise confirmation sans SMTP en %s', NODE_ENV => {
+    expect(loadConfig({ ...isolated, NODE_ENV, REQUIRE_EMAIL_VERIFICATION: 'true' }).SMTP_HOST).toBe('');
+  });
+  it.each([
+    { SMTP_USER: 'user' }, { SMTP_PASS: 'private-pass' }, { MAIL_FROM: 'mail@example.com' },
+    { SMTP_USER: 'user', SMTP_PASS: 'private-pass' },
+    { SMTP_HOST: 'smtp.example.com' }, { SMTP_HOST: 'smtp.example.com', MAIL_FROM: 'invalid' },
+    { SMTP_HOST: 'smtp.example.com', MAIL_FROM: 'mail@example.com', SMTP_USER: 'user' },
+    { SMTP_HOST: 'smtp.example.com', MAIL_FROM: 'mail@example.com', SMTP_PASS: 'private-pass' },
+  ])('refuse SMTP partiel %j', extra => {
+    expect(() => loadConfig({ ...production, ...extra })).toThrow('Configuration invalide');
+  });
+  it('accepte relais sans authentification et identifiants complets', () => {
+    const smtp = { ...production, SMTP_HOST: 'smtp.example.com', MAIL_FROM: 'mail@example.com' };
+    expect(loadConfig(smtp).SMTP_USER).toBe('');
+    expect(loadConfig({ ...smtp, SMTP_USER: 'user', SMTP_PASS: 'private-pass' }).SMTP_USER).toBe('user');
+  });
+  it('conserve secret 48 caractères non factice et HTTPS obligatoires sans SMTP', () => {
+    for (const SESSION_SECRET of ['a'.repeat(47), 'replace-' + 'a'.repeat(48)]) {
+      expect(() => loadConfig({ ...production, SESSION_SECRET })).toThrow('SESSION_SECRET de production');
+    }
+    for (const key of ['FRONTEND_URL', 'CORS_ORIGIN']) {
+      expect(() => loadConfig({ ...production, [key]: 'http://app.example.com' })).toThrow('HTTPS requis');
+    }
+  });
+});
+
 describe('MONGODB_DB sans environnement utilisateur', () => {
   it.each([undefined, '', '   ', '\t\n'])('traite %j comme absent', value => {
     expect(loadConfig({ ...isolated, MONGODB_DB: value }).MONGODB_DB).toBeUndefined();
