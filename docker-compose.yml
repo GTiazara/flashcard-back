@@ -1,0 +1,76 @@
+services:
+  flashcard-back:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: flashcard-back:prod
+    container_name: flashcard-back
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 15s
+    expose:
+      - "3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      MONGODB_URI: ${MONGODB_URI:?Renseigner MONGODB_URI}
+      # Vide : conserver la base de l'URI, sans écraser sa sélection.
+      MONGODB_DB: ${MONGODB_DB:-}
+      MONGODB_TRANSACTIONS: ${MONGODB_TRANSACTIONS:-auto}
+      SESSION_SECRET: ${SESSION_SECRET:?Renseigner un secret de session aleatoire de 48 caracteres minimum}
+      FRONTEND_URL: ${FRONTEND_URL:?Renseigner l origine HTTPS du frontend}
+      CORS_ORIGIN: ${CORS_ORIGIN:?Renseigner l origine HTTPS exacte du frontend}
+      # Un relais : Traefik directement devant l'API. Adapter au réseau réel.
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      REQUIRE_EMAIL_VERIFICATION: ${REQUIRE_EMAIL_VERIFICATION:-false}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}
+      AUTH_RATE_LIMIT: ${AUTH_RATE_LIMIT:-30}
+      CARD_TEXT_MAX_LENGTH: ${CARD_TEXT_MAX_LENGTH:-10000}
+      # SMTP obligatoire dans la configuration production du backend.
+      SMTP_HOST: ${SMTP_HOST:?Renseigner SMTP_HOST pour la recuperation de compte}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:?Renseigner MAIL_FROM}
+    networks:
+      - default
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.flashcard-back.rule=Host(`${BACKEND_HOST:-flashcardback.skippylab.com}`)"
+      - "traefik.http.routers.flashcard-back.entrypoints=websecure"
+      - "traefik.http.routers.flashcard-back.tls=true"
+      # Décommenter si votre Traefik possède un resolver nommé le :
+      # - "traefik.http.routers.flashcard-back.tls.certresolver=le"
+      - "traefik.http.routers.flashcard-back.service=flashcard-back"
+      - "traefik.http.services.flashcard-back.loadbalancer.server.port=3000"
+      - "traefik.http.routers.flashcard-back-http.rule=Host(`${BACKEND_HOST:-flashcardback.skippylab.com}`)"
+      - "traefik.http.routers.flashcard-back-http.entrypoints=web"
+      - "traefik.http.routers.flashcard-back-http.middlewares=flashcard-back-https"
+      - "traefik.http.routers.flashcard-back-http.service=flashcard-back"
+      - "traefik.http.middlewares.flashcard-back-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.flashcard-back-https.redirectscheme.permanent=true"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/ready', {signal: AbortSignal.timeout(4000)}).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+networks:
+  proxy:
+    external: true
+    name: proxy
