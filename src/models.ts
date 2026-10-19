@@ -31,13 +31,33 @@ export const Deck = mongoose.model('Deck', new Schema({
   description: { ...text(4000), default: '' }, subject: { ...text(100), default: '' }, level: { ...text(100), default: '' },
   visibility: { type: String, enum: ['private', 'unlisted', 'public'], default: 'private', index: true },
   coverUrl: { ...text(2048), default: '' },
+  quickDefault: { type: Boolean, default: false, select: false },
 }, { timestamps: true }));
 Deck.schema.index({ owner: 1, createdAt: -1 });
-export const Card = mongoose.model('Card', new Schema({
-  deck: ref('Deck'), owner: ref('User'), front: text(CARD_TEXT_MAX_LENGTH, true), back: text(CARD_TEXT_MAX_LENGTH, true),
+Deck.schema.index({ owner: 1, quickDefault: 1 }, { unique: true, partialFilterExpression: { quickDefault: true } });
+function httpImage(value: unknown) {
+  if (typeof value !== 'string' || !value || value.length > 2048) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch { return false; }
+}
+const cardSchema = new Schema({
+  deck: ref('Deck'), owner: ref('User'),
+  front: { ...text(CARD_TEXT_MAX_LENGTH), default: '' }, back: { ...text(CARD_TEXT_MAX_LENGTH), default: '' },
+  frontImageUrl: { ...text(2048), default: '' }, backImageUrl: { ...text(2048), default: '' },
   position: { type: Number, min: 0, default: 0, validate: Number.isInteger },
-}, { timestamps: true }));
-Card.schema.index({ deck: 1, position: 1, _id: 1 });
+}, { timestamps: true });
+cardSchema.pre('validate', function () {
+  for (const [label, textKey, imageKey] of [['question', 'front', 'frontImageUrl'], ['réponse', 'back', 'backImageUrl']] as const) {
+    const face = String(this.get(textKey) ?? '').trim();
+    const image = String(this.get(imageKey) ?? '').trim();
+    if (image && !httpImage(image)) this.invalidate(imageKey, 'URL HTTP(S) requise.');
+    if (!face && !httpImage(image)) this.invalidate(textKey, `La ${label} doit contenir un texte ou une URL d'image.`);
+  }
+});
+cardSchema.index({ deck: 1, position: 1, _id: 1 });
+export const Card = mongoose.model('Card', cardSchema);
 const publicationSchema = new Schema({ deck: { ...ref('Deck'), unique: true }, owner: ref('User') }, { timestamps: { createdAt: true, updatedAt: false } });
 export const Publication = mongoose.model('Publication', publicationSchema);
 const likeSchema = new Schema({ user: ref('User'), publication: ref('Publication') }, { timestamps: true });

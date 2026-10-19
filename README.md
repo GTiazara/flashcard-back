@@ -25,7 +25,7 @@ Validation locale de cette livraison : configuration Compose validée avec des v
 
 **Proxy :** `TRUST_PROXY=1` suppose que Traefik est le relais directement devant l'API, sans accès direct au port par un client non fiable ; adapter cette valeur à la topologie réelle. Les variables SvelteKit `ORIGIN`, `HOST_HEADER`, `PROTOCOL_HEADER`, `ADMIN_SECRET` et `BODY_SIZE_LIMIT` de geopinpoint ne sont pas des paramètres de cette API Express et ne sont donc pas reprises. Le backend écoute déjà sur toutes les interfaces ; `HOST` n'est pas nécessaire.
 
-**Maintenance :** un ancien index email doit être migré avant le démarrage des profils invités, selon la procédure ci-dessous. L'image de production ne contient pas `tsx` ni les scripts de maintenance : exécuter la migration depuis une copie de travail avec ses dépendances de développement, API arrêtée, pas en contournant l'erreur ou en supprimant les utilisateurs. Sur standalone, garder une seule instance backend ; préférer `MONGODB_TRANSACTIONS=required` avec replica set pour exiger l'atomicité.
+**Maintenance :** un ancien index email doit être migré avant le démarrage des profils invités, selon la procédure ci-dessous. L'image de production ne contient pas `tsx` ni les scripts de maintenance : exécuter la migration depuis une copie de travail avec ses dépendances de développement, API arrêtée, pas en contournant l'erreur ou en supprimant les utilisateurs. Sur standalone, garder une seule instance backend ; préférer `MONGODB_TRANSACTIONS=required` avec replica set pour exiger l'atomicité. Le contenu d'exemple `npm run seed:mnemo` s'exécute de la même façon depuis une copie de travail (voir [Compte et paquets d'exemple](#compte-et-paquets-dexemple-seedmnemo)).
 
 ### Démarrage sans Docker
 
@@ -34,6 +34,31 @@ Validation locale de cette livraison : configuration Compose validée avec des v
 3. Définir `MONGODB_URI` et remplacer `SESSION_SECRET` par une valeur aléatoire. Une URI vide empêche le démarrage avec un message explicite. Ne jamais publier ce fichier ni ses valeurs.
 4. Exécuter `npm run dev` pour le développement, ou `npm run build` puis `npm start` pour le JavaScript compilé.
 5. Exécuter `npm test` pour les tests d'intégration. Ils ne lisent pas `.env` et n'utilisent jamais la base de travail.
+6. Facultatif : exécuter `npm run seed:mnemo` pour ajouter le compte `mnemo` et ses paquets publics d'exemple (voir ci-dessous).
+
+### Compte et paquets d'exemple (`seed:mnemo`)
+
+Tant que l'application compte peu d'utilisateurs, le fil public serait vide. Le script [scripts/seed-mnemo.ts](scripts/seed-mnemo.ts) le peuple avec des contenus d'exemple :
+
+```bash
+npm run seed:mnemo
+```
+
+1. **Compte** : crée l'utilisateur permanent `mnemo` (nom affiché « Mnemo », email confirmé) s'il n'existe pas. S'il existe déjà, il est réutilisé sans modification. Le script s'arrête sans rien écrire si `mnemo` est un profil invité ou si l'email choisi appartient déjà à un autre compte.
+2. **Paquets** : 8 paquets publics de culture générale, 8 cartes question / réponse chacun (géographie, histoire, sciences, arts, littérature, cinéma, musique, sport), plus le paquet « Culture g : en images » (une trentaine de cartes : texte, image HTTP(S), ou les deux sur chaque face). Matière affichée : « Culture générale ». Chacun est créé privé, rempli, puis publié avec sa publication : il apparaît dans le fil, la recherche et le profil `/profiles/mnemo`. Les images d'exemple viennent de Wikimedia Commons.
+3. **Seuil** : dès que la base compte au moins `MNEMO_MIN_USERS` comptes permanents hors `mnemo` (les invités ne comptent pas), aucun paquet n'est ajouté. Les exemples de culture générale déjà présents restent : les retirer depuis le compte `mnemo` si nécessaire. L'ancien catalogue scolaire, encore intact (description d'exemple d'origine), est retiré avant d'ajouter la culture générale.
+
+Le script est idempotent : un paquet est retrouvé par son titre chez `mnemo`. S'il correspond encore au catalogue, ses cartes manquantes sont ajoutées et il est republié ; s'il a été modifié (description ou cartes), il est laissé tel quel. Les écritures passent par le même exécuteur que l'API (transactions en replica set, file sérialisée en standalone).
+
+| Variable | Rôle |
+| --- | --- |
+| `MNEMO_EMAIL` | Email du compte, défaut `mnemo@example.invalid` (adresse non routable : la récupération de mot de passe ne fonctionnera pas) |
+| `MNEMO_PASSWORD` | Utilisé seulement à la création ; 12 caractères à 72 octets UTF-8. Absent : mot de passe aléatoire **affiché une seule fois** dans la console |
+| `MNEMO_MIN_USERS` | Entier de 1 à 100000, défaut `5` |
+
+Le script charge `.env` via dotenv sans écraser les variables déjà exportées et utilise aussi `MONGODB_URI`, `MONGODB_DB` et `MONGODB_TRANSACTIONS`. Ces variables `MNEMO_*` ne sont jamais lues par l'API. Conserver le mot de passe généré dans un gestionnaire de secrets ; ne pas le copier dans un ticket. Pour le changer ensuite, se connecter au compte `mnemo`, ou supprimer ce compte puis relancer le script.
+
+**Production :** l'image ne contient ni `tsx` ni les scripts. Lancer le seed depuis une copie de travail ayant ses dépendances de développement, avec `MONGODB_URI`/`MONGODB_DB` de production exportés dans le shell (le script ne lit pas `.env.production`). L'API peut rester démarrée ; en standalone, la file de sérialisation est propre au processus du script et ne protège donc pas des écritures concurrentes de l'API : préférer un moment de faible trafic.
 
 ### Port occupé et arrêt du backend
 
@@ -219,13 +244,14 @@ Sessions MongoDB dans `sessions`, cookie `flashcard.sid`, `httpOnly`, `sameSite=
 | GET / POST `/decks` | Mes decks avec cardCount / création `{title,description?,chapter?,subject?,level?,visibility?,coverUrl?}` |
 | GET `/decks/:id` | Deck accessible avec cards ordonnées, cardCount et owner `{_id,username,displayName,avatarUrl}` |
 | PATCH / DELETE `/decks/:id` | Propriétaire ; champs de création partiels / cascade |
-| POST `/decks/:id/cards` | Propriétaire : `{front,back,position?}` ; position finale automatique si absente |
-| PATCH / DELETE `/cards/:id` | Propriétaire : `{front?,back?,position?}` / suppression |
+| POST `/decks/:id/cards` | Propriétaire : `{front?,back?,frontImageUrl?,backImageUrl?,position?}` ; chaque face a un texte ou une image ; position finale automatique si absente |
+| POST `/cards/quick` | Création rapide : mêmes faces et `deck?`. Sans deck, crée au besoin le paquet privé unique « Général ». Réponse `{card, deck:{_id,title}}` |
+| PATCH / DELETE `/cards/:id` | Propriétaire : `{front?,back?,frontImageUrl?,backImageUrl?,position?}` / suppression |
 | PUT `/decks/:id/cards/order` | Propriétaire : `{ids:[]}` permutation complète, sans doublon ni carte étrangère ; retourne deck avec cards |
 
-`chapter` est facultatif ; `null` sur PATCH détache le paquet. Le chapitre doit appartenir au même utilisateur et son cours doit exister. Suppression d'un cours → chapitres → decks → cartes, publications, likes, sauvegardes et historique associé. Suppression d'un chapitre applique la même cascade à ses decks. Les listes de chapitres/cartes sont triées par position puis `_id` ; les autres listes par date puis `_id` décroissants.
+`chapter` est facultatif ; `null` sur PATCH détache le paquet. Le chapitre doit appartenir au même utilisateur et son cours doit exister. La création rapide peut viser n'importe quel paquet propriétaire, y compris un paquet rangé dans un cours. Sans choix, le marqueur interne `quickDefault` garantit un seul paquet « Général » par propriétaire et n'est pas exposé dans les réponses API. Suppression d'un cours → chapitres → decks → cartes, publications, likes, sauvegardes et historique associé. Suppression d'un chapitre applique la même cascade à ses decks. Les listes de chapitres/cartes sont triées par position puis `_id` ; les autres listes par date puis `_id` décroissants.
 
-Les URL sont HTTP(S) uniquement ou vides. Titres : 1–160 caractères ; descriptions : 4000 ; front/back : 1–`CARD_TEXT_MAX_LENGTH` ; displayName : 1–80 ; bio : 1000. Les corps n'acceptent aucun champ inconnu et les PATCH vides sont refusés. Les textes sont stockés comme texte brut : le frontend ne doit pas les injecter en HTML non assaini.
+Les URL sont HTTP(S) uniquement ou vides, au plus 2048 caractères. Titres : 1–160 caractères ; descriptions : 4000 ; displayName : 1–80 ; bio : 1000. Chaque face de carte (`front` / `back`) contient un texte, une image (`frontImageUrl` / `backImageUrl`), ou les deux. Le texte, après trim, va de 0 à `CARD_TEXT_MAX_LENGTH` caractères et peut être vide seulement si l'image HTTP(S) de la même face est présente. Un PATCH de position seule reste possible. Les corps n'acceptent aucun champ inconnu et les PATCH vides sont refusés. Les textes sont stockés comme texte brut : le frontend ne doit pas les injecter en HTML non assaini. Les images sont affichées par leur URL, sans téléchargement ni HTML.
 
 `GET /api/config` est public et renvoie uniquement `{ "cardTextMaxLength": 10000 }` (ou la valeur configurée), jamais les secrets de configuration. La configuration est validée au démarrage puis injectée dans chaque routeur ; aucune lecture d’environnement par validation ni mutation globale des modèles. POST et PATCH des faces appliquent la limite après trim, en unités UTF-16 (comme `String.length` et `maxlength` du navigateur). Le plafond Mongoose reste 10000, commun à tous les modèles/processus ; le corps JSON reste limité à **256 ko**. Une valeur supérieure à 10000, nulle, fractionnaire ou invalide empêche le démarrage. Redémarrer le backend puis recharger le frontend après un changement. Les cartes existantes ne sont ni tronquées ni migrées : une face renvoyée en écriture doit respecter la nouvelle limite ; un PATCH de position seule reste possible.
 
@@ -241,7 +267,7 @@ Validation des limites le 18 octobre 2026 : build backend réussi et **23 tests 
 | Méthode / route | Entrée / résultat |
 | --- | --- |
 | POST `/decks/:id/publish` | Propriétaire, `{}` ; publication directe `{_id,deck,owner,createdAt}` ; idempotent |
-| GET `/feed?sort=recent\|popular&q=&page=1&limit=12` | Public ; publications `{_id,createdAt,deck:{...deck,cardCount,preview:{front,back}},owner:{_id,username,displayName,avatarUrl},likeCount,liked,saved}` |
+| GET `/feed?sort=recent\|popular&q=&page=1&limit=12` | Public ; publications `{_id,createdAt,deck:{...deck,cardCount,preview:{front,back,frontImageUrl,backImageUrl}},owner:{_id,username,displayName,avatarUrl},likeCount,liked,saved}` |
 | PUT `/publications/:id/like` | Auth : `{liked:boolean}` ; `{liked,likeCount}` ; idempotent |
 | GET `/saved` | Auth ; liste de decks publics actuels avec cardCount et owner, pas de copie |
 | PUT `/decks/:id/save` | Auth : `{saved:boolean}` ; `{saved}` ; public seulement, idempotent |
@@ -267,6 +293,8 @@ Validation des limites le 18 octobre 2026 : build backend réussi et **23 tests 
 - `src/mail.ts` : SMTP et liens de développement explicites.
 - `src/server.ts` : démarrage validé, index et arrêt gracieux.
 - `src/topology.ts` : détection hello/isMaster, refus required et avertissement standalone.
+- `scripts/migrate-email-index.ts` : migration explicite de l'ancien index email, API arrêtée.
+- `scripts/seed-mnemo.ts` : compte `mnemo` et paquets publics d'exemple, idempotent.
 - `tests/integration.test.ts` : tests HTTP avec sessions réelles, replica set et standalone MongoDB temporaires.
 - `tests/topology.test.ts`, `tests/executor.test.ts`, `tests/startup-error.test.ts` : commandes compatibles 4.4, modes, exécuteurs et diagnostics sans secrets.
 

@@ -40,8 +40,16 @@ export function apiRouter(config: Pick<Config, 'CARD_TEXT_MAX_LENGTH'>, execute:
     else res.status(status).json(result);
   };
   const cardTextMaxLength = config.CARD_TEXT_MAX_LENGTH;
-  const cardText = z.string().trim().min(1).max(cardTextMaxLength);
-  const cardInput = z.object({ front: cardText, back: cardText, position: position.optional() }).strict();
+  const cardText = z.string().trim().max(cardTextMaxLength);
+  const cardShape = z.object({
+    front: cardText.optional(), back: cardText.optional(),
+    frontImageUrl: url.optional(), backImageUrl: url.optional(), position: position.optional(),
+  }).strict();
+  const faceReady = (face?: string, image?: string) => Boolean(face?.trim() || image?.trim());
+  const cardInput = cardShape.superRefine((value, ctx) => {
+    if (!faceReady(value.front, value.frontImageUrl)) ctx.addIssue({ code: 'custom', path: ['front'], message: 'La question doit contenir un texte ou une URL d\'image.' });
+    if (!faceReady(value.back, value.backImageUrl)) ctx.addIssue({ code: 'custom', path: ['back'], message: 'La réponse doit contenir un texte ou une URL d\'image.' });
+  });
 
   router.get('/config', (_req, res) => res.json({ cardTextMaxLength }));
 
@@ -151,11 +159,35 @@ export function apiRouter(config: Pick<Config, 'CARD_TEXT_MAX_LENGTH'>, execute:
     const last = await Card.findOne({ deck: deck._id }).sort({ position: -1 });
     return Card.create({ ...input, position: input.position ?? (last ? last.position + 1 : 0), deck: deck._id, owner: req.userId });
   }, 201));
+  router.post('/cards/quick', authenticated, mutation(async req => {
+    const input = cardInput.safeExtend({ deck: idSchema.optional() }).parse(req.body);
+    const { deck: deckId, ...card } = input;
+    let deck = deckId
+      ? await writableDeck(deckId, req.userId)
+      : await Deck.findOne({ owner: req.userId, quickDefault: true }).select('+quickDefault');
+    if (!deck) {
+      deck = await Deck.findOneAndUpdate(
+        { owner: req.userId, quickDefault: true },
+        { $setOnInsert: { owner: req.userId, title: 'Général', description: 'Mes cartes créées rapidement.', subject: 'Général', visibility: 'private', quickDefault: true } },
+        { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true },
+      ).select('+quickDefault');
+    }
+    await lockDeck(deck);
+    const last = await Card.findOne({ deck: deck._id }).sort({ position: -1 });
+    const created = await Card.create({ ...card, position: last ? last.position + 1 : 0, deck: deck._id, owner: req.userId });
+    return { card: created, deck: { _id: deck._id, title: deck.title } };
+  }, 201));
   router.patch('/cards/:id', authenticated, mutation(async req => {
-    const input = nonempty(cardInput).parse(req.body);
+    const input = nonempty(cardShape).parse(req.body);
     const card = await ownedCard(param(req), req.userId);
     const deck = await writableDeck(String(card.deck), req.userId);
     await lockDeck(deck);
+    const next = {
+      front: input.front ?? card.front, back: input.back ?? card.back,
+      frontImageUrl: input.frontImageUrl ?? card.frontImageUrl ?? '', backImageUrl: input.backImageUrl ?? card.backImageUrl ?? '',
+    };
+    if (('front' in input || 'frontImageUrl' in input) && !faceReady(next.front, next.frontImageUrl)) throw new HttpError(400, 'La question doit contenir un texte ou une URL d\'image.');
+    if (('back' in input || 'backImageUrl' in input) && !faceReady(next.back, next.backImageUrl)) throw new HttpError(400, 'La réponse doit contenir un texte ou une URL d\'image.');
     Object.assign(card, input);
     return card.save();
   }));
@@ -210,7 +242,7 @@ export function apiRouter(config: Pick<Config, 'CARD_TEXT_MAX_LENGTH'>, execute:
     const items = [];
     for (const publication of publications) {
       const cardCount = await Card.countDocuments({ deck: publication.deck._id });
-      const preview = await Card.findOne({ deck: publication.deck._id }).sort({ position: 1, _id: 1 }).select('front back -_id').lean();
+      const preview = await Card.findOne({ deck: publication.deck._id }).sort({ position: 1, _id: 1 }).select('front back frontImageUrl backImageUrl -_id').lean();
       items.push({ ...publication, deck: { ...publication.deck, cardCount, preview },
         liked: Boolean(req.userId && await Like.exists({ user: req.userId, publication: publication._id })),
         saved: Boolean(req.userId && await Saved.exists({ user: req.userId, deck: publication.deck._id })),

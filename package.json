@@ -10,6 +10,7 @@
     "start": "node dist/server.js",
     "test": "vitest run",
     "migrate:email-index": "tsx scripts/migrate-email-index.ts",
+    "seed:mnemo": "tsx scripts/seed-mnemo.ts",
     "test:watch": "vitest"
   },
   "dependencies": {

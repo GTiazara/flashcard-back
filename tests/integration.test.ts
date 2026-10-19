@@ -685,6 +685,34 @@ describe('Limites configurables des faces', () => {
     await agent.post(`/api/decks/${id}/cards`).send({ front: 'Q', back: 'R' }).expect(201);
     await agent.post(`/api/decks/${id}/cards`).send({ front: 'QQ', back: 'R' }).expect(400);
   });
+  it('accepte un texte, une image HTTP ou les deux sur chaque face', async () => {
+    const id = await deck();
+    const japan = 'https://upload.wikimedia.org/wikipedia/commons/9/9e/Flag_of_Japan.svg';
+    const france = 'https://upload.wikimedia.org/wikipedia/en/c/c3/Flag_of_France.svg';
+    const created = (await alice.post(`/api/decks/${id}/cards`).send({ front: 'Quel drapeau représente le Japon ?', back: '', backImageUrl: japan }).expect(201)).body;
+    expect(created).toMatchObject({ back: '', backImageUrl: japan });
+    await alice.post(`/api/decks/${id}/cards`).send({ front: '', back: 'La France', frontImageUrl: france }).expect(201);
+    await alice.post(`/api/decks/${id}/cards`).send({ front: '', back: '', frontImageUrl: japan, backImageUrl: france }).expect(201);
+    await alice.post(`/api/decks/${id}/cards`).send({ front: 'Question', back: '' }).expect(400);
+    await alice.post(`/api/decks/${id}/cards`).send({ front: 'Question', back: 'Réponse', backImageUrl: 'javascript:alert(1)' }).expect(400);
+    await alice.patch(`/api/cards/${created._id}`).send({ backImageUrl: '' }).expect(400);
+    await alice.post(`/api/decks/${id}/publish`).send({}).expect(200);
+    expect((await request(service.app).get('/api/feed')).body.items[0].deck.preview).toMatchObject({ front: 'Quel drapeau représente le Japon ?', backImageUrl: japan });
+  });
+  it('range les cartes rapides dans un paquet Général unique ou dans le paquet choisi', async () => {
+    const first = (await alice.post('/api/cards/quick').send({ front: 'Question rapide', back: 'Réponse rapide' }).expect(201)).body;
+    const second = (await alice.post('/api/cards/quick').send({ front: 'Autre question', back: 'Autre réponse' }).expect(201)).body;
+    expect(first.deck).toMatchObject({ title: 'Général' });
+    expect(second.deck._id).toBe(first.deck._id);
+    expect(await Deck.countDocuments({ owner: aliceId, quickDefault: true })).toBe(1);
+    expect(await Card.countDocuments({ deck: first.deck._id })).toBe(2);
+
+    const chosen = await deck();
+    const explicit = (await alice.post('/api/cards/quick').send({ front: 'Cours', back: 'Contenu', deck: chosen }).expect(201)).body;
+    expect(explicit.deck._id).toBe(chosen);
+    await bob.post('/api/cards/quick').send({ front: 'Intrusion', back: 'Refusée', deck: chosen }).expect(404);
+    await alice.post('/api/cards/quick').send({ front: '', back: 'Invalide' }).expect(400);
+  });
 });
 
 describe('Standalone : sérialisation, validation préalable et erreurs partielles explicites', () => {
