@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { Card, Chapter, Course, Deck, Like, Publication, Saved, StudySession } from './models.js';
+import { Card, Chapter, Course, Deck, Like, Publication, Saved, StudySession, User } from './models.js';
 import { HttpError, ownerFields } from './http.js';
 
 // Les transactions protègent aussi les invariants publication/carte lors d'écritures concurrentes.
@@ -69,6 +69,18 @@ export async function deleteDecks(ids: unknown[]) {
   await StudySession.deleteMany({ deck: { $in: ids } });
   await Card.deleteMany({ deck: { $in: ids } });
   await Deck.deleteMany({ _id: { $in: ids } });
+}
+export async function deleteAccount(userId: string) {
+  const decks = await Deck.find({ owner: userId }).select('_id');
+  await deleteDecks(decks.map(deck => deck._id));
+  const chapters = await Chapter.find({ owner: userId }).select('_id');
+  await deleteChapters(chapters.map(chapter => chapter._id));
+  await Course.deleteMany({ owner: userId });
+  await Like.deleteMany({ user: userId });
+  await Saved.deleteMany({ user: userId });
+  await StudySession.deleteMany({ user: userId });
+  const removed = await User.deleteOne({ _id: userId });
+  if (!removed.deletedCount) throw new HttpError(404, 'Compte introuvable.');
 }
 export async function deleteChapters(ids: unknown[]) {
   const decks = await Deck.find({ chapter: { $in: ids } }).select('_id');

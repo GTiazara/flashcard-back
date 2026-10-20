@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import mongoose, { Schema } from 'mongoose';
 import { CARD_TEXT_MAX_LENGTH } from './limits.js';
 
@@ -8,7 +9,7 @@ const userSchema = new Schema({
   isGuest: { type: Boolean, default: false, required: true },
   email: { ...text(254), lowercase: true, select: false },
   passwordHash: { type: String, required: permanentIdentity, select: false },
-  recoverySecret: { type: String, select: false, match: /^[a-f0-9]{64}$/ },
+  recoverySecretHash: { type: String, select: false, match: /^[a-f0-9]{64}$/ },
   guestTokenHash: { type: String, select: false, unique: true, sparse: true },
   username: { ...text(24, true), match: /^[a-z0-9_]{3,24}$/, unique: true },
   displayName: text(80, true), bio: { ...text(1000), default: '' }, avatarUrl: { ...text(2048), default: '' },
@@ -85,6 +86,14 @@ export async function initializeIndexes() {
     if (indexes.some(index => Object.keys(index.key).length === 1 && index.key.email === 1 && index.unique && !index.partialFilterExpression)) {
       throw Object.assign(new Error('Index email historique incompatible avec les invités : exécuter la migration email en maintenance (voir README). Aucun index supprimé.'), { code: 'LEGACY_EMAIL_INDEX' });
     }
+  }
+  const legacy = await User.collection.find({ recoverySecret: { $type: 'string' } }).project({ recoverySecret: 1 }).toArray();
+  for (const doc of legacy) {
+    if (typeof doc.recoverySecret !== 'string' || !/^[a-f0-9]{64}$/.test(doc.recoverySecret)) continue;
+    await User.collection.updateOne({ _id: doc._id, recoverySecret: doc.recoverySecret }, {
+      $set: { recoverySecretHash: createHash('sha256').update(doc.recoverySecret).digest('hex') },
+      $unset: { recoverySecret: '' },
+    });
   }
   await Promise.all(Object.values(mongoose.models).map(model => model.init()));
 }

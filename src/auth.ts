@@ -4,6 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import type { Config } from './config.js';
 import { User } from './models.js';
+import { createMutationExecutor, deleteAccount, type MutationExecutor } from './data.js';
 import { HttpError, publicUser } from './http.js';
 import { sendToken } from './mail.js';
 
@@ -60,7 +61,7 @@ async function loginSession(req: Request, user: { _id: unknown; authVersion: num
   await new Promise<void>((resolve, reject) => req.session.save(err => err ? reject(err) : resolve()));
 }
 
-export function authRouter(config: Config) {
+export function authRouter(config: Config, execute: MutationExecutor = createMutationExecutor()) {
   const router = Router();
   router.post('/guest', async (req, res) => {
     z.object({}).strict().parse(req.body);
@@ -103,7 +104,7 @@ export function authRouter(config: Config) {
       username: input.username,
       displayName: input.displayName ?? previous?.displayName ?? input.username,
       passwordHash: await bcrypt.hash(input.password, 12),
-      recoverySecret,
+      recoverySecretHash: hash(recoverySecret),
       emailVerified: Boolean(input.email) && !config.REQUIRE_EMAIL_VERIFICATION,
       ...(input.email ? { email: input.email } : {}),
       ...(input.email && config.REQUIRE_EMAIL_VERIFICATION ? {
@@ -126,7 +127,7 @@ export function authRouter(config: Config) {
           await User.updateOne({ _id: user._id, isGuest: false, emailVerified: false, authVersion: user.authVersion, verificationTokenHash: hash(verificationToken) }, {
             $set: { isGuest: true, username: previous.username, displayName: previous.displayName, emailVerified: false,
               authVersion: previous.authVersion, guestTokenHash: previous.guestTokenHash },
-            $unset: { email: 1, passwordHash: 1, verificationTokenHash: 1, verificationExpiresAt: 1, recoverySecret: 1 },
+            $unset: { email: 1, passwordHash: 1, verificationTokenHash: 1, verificationExpiresAt: 1, recoverySecretHash: 1 },
           });
         } else await User.deleteOne({ _id: user._id, emailVerified: false, verificationTokenHash: hash(verificationToken) });
         throw new HttpError(503, 'Email de confirmation indisponible. Réessayez plus tard.');
@@ -191,22 +192,21 @@ export function authRouter(config: Config) {
     res.json({ message: 'Mot de passe réinitialisé. Reconnectez-vous.' });
   });
   router.get('/recovery', authenticated, async (req, res) => {
-    const user = await User.findById(req.userId).select('+recoverySecret +email');
+    const user = await User.findById(req.userId).select('+recoverySecretHash +email');
     if (!user || user.isGuest) throw new HttpError(404, 'Un profil temporaire n’a pas de lien de récupération.');
-    if (!user.recoverySecret) { user.recoverySecret = token(); await user.save(); }
-    res.json({ url: recoveryUrl(config, user.recoverySecret), hasEmail: Boolean(user.email) });
+    res.json({ hasLink: Boolean(user.recoverySecretHash), hasEmail: Boolean(user.email) });
   });
   router.post('/recovery', authenticated, async (req, res) => {
     z.object({}).strict().parse(req.body ?? {});
     const secret = token();
-    const user = await User.findOneAndUpdate({ _id: req.userId, isGuest: { $ne: true } }, { $set: { recoverySecret: secret } }, { new: true }).select('+email');
+    const user = await User.findOneAndUpdate({ _id: req.userId, isGuest: { $ne: true } }, { $set: { recoverySecretHash: hash(secret) } }, { new: true }).select('+email');
     if (!user) throw new HttpError(404, 'Un profil temporaire n’a pas de lien de récupération.');
-    res.json({ url: recoveryUrl(config, secret), hasEmail: Boolean(user.email) });
+    res.json({ url: recoveryUrl(config, secret), hasLink: true, hasEmail: Boolean(user.email) });
   });
   router.post('/recover', async (req, res) => {
     const input = z.object({ token: tokenSchema, password }).strict().parse(req.body);
     const passwordHash = await bcrypt.hash(input.password, 12);
-    const user = await User.findOneAndUpdate({ isGuest: { $ne: true }, recoverySecret: input.token }, {
+    const user = await User.findOneAndUpdate({ isGuest: { $ne: true }, recoverySecretHash: hash(input.token) }, {
       $set: { passwordHash }, $inc: { authVersion: 1 },
     });
     if (!user) throw new HttpError(400, 'Lien de récupération invalide.');
@@ -220,6 +220,21 @@ export function authRouter(config: Config) {
     });
     if (!user) throw new HttpError(400, 'Lien de confirmation invalide ou expiré.');
     res.json({ message: 'Adresse email confirmée. Vous pouvez vous connecter.' });
+  });
+  router.post('/delete-account', authenticated, async (req, res) => {
+    const input = z.object({ confirm: z.literal('supprimer'), password: z.string().min(1).max(256).optional() }).strict().parse(req.body);
+    const user = await User.findById(req.userId).select('+passwordHash');
+    if (!user) throw new HttpError(401, 'Session invalide.');
+    if (!user.isGuest) {
+      if (!input.password) throw new HttpError(400, 'Mot de passe requis.');
+      const valid = await bcrypt.compare(input.password, user.passwordHash ?? dummyHash);
+      if (!valid) throw new HttpError(400, 'Mot de passe incorrect.');
+    }
+    await execute(() => deleteAccount(String(user._id)));
+    await new Promise<void>((resolve, reject) => req.session.destroy(err => err ? reject(err) : resolve()));
+    res.clearCookie('flashcard.sid', cookieOptions(config));
+    clearGuestCookie(res, config);
+    res.sendStatus(204);
   });
   return router;
 }
