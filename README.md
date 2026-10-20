@@ -193,8 +193,11 @@ Toutes les mutations, **y compris DELETE, logout et publish sans corps**, exigen
 | Méthode / route | Entrée | Résultat |
 | --- | --- | --- |
 | POST `/auth/guest` | `{}` strict | 200, utilisateur direct + session invitée (ou compte permanent déjà authentifié inchangé) |
-| POST `/auth/register` | `{email,password,username,displayName}` | 201, crée un compte ou convertit l'invité courant, même `_id` ; utilisateur direct + session, ou `{requiresVerification:true,message,devVerificationUrl?}` |
-| POST `/auth/login` | `{email,password}` | Utilisateur direct + session renouvelée |
+| POST `/auth/register` | `{username,password,email?,displayName?}` | 201 + `recoveryUrl` affiché une seule fois à la création. Sans email : session immédiate, nom affiché = pseudo ou nom d'invité conservé. Avec email : comportement historique |
+| POST `/auth/login` | `{username,password}` ou `{email,password}` | Utilisateur direct + session renouvelée. L'email reste accepté pour les comptes qui en ont un |
+| GET `/auth/recovery` | Session permanente | `{url,hasEmail}` visible seulement par le propriétaire. Crée le lien s'il manque. Jamais sur le profil public |
+| POST `/auth/recovery` | `{}` | Remplace le lien. L'ancien ne fonctionne plus |
+| POST `/auth/recover` | `{token,password}` | Nouveau mot de passe, sessions révoquées, le même lien reste valable |
 | POST `/auth/logout` | `{}` | 204, session détruite, cookies session et device invité effacés pour tous les comptes |
 | GET `/auth/me` | — | Utilisateur direct, ou 401 |
 | POST `/auth/forgot-password` | `{email}` | 200 `{message,devResetUrl?}` ; production sans SMTP : 503 `{message}` identique pour toute adresse valide |
@@ -213,9 +216,9 @@ Le seul secret d'identité invitée côté navigateur est le cookie **serveur** 
 
 Les invités utilisent exactement les permissions propriétaire existantes : cours, chapitres, cartes, publications et historique restent liés au même User. Aucun reset quotidien, aucune purge et **aucun TTL sur les users ou leurs contenus**. Les 400 jours sont une durée maximale demandée au navigateur, pas une garantie de conservation du cookie et **pas une promesse de purge des données**. Message de profil conseillé : « Profil invité lié à ce navigateur. La perte des cookies ou la déconnexion peut vous faire perdre l'accès à vos cours. Créez un compte pour sécuriser cet accès. » Les noms affichés sont générés à partir de mots originaux du projet, sans liste de personnalités reprise.
 
-`POST /register` convertit uniquement l'invité de la **session authentifiée courante** (initialiser guest avant), jamais un invité indiqué par ID ou par le seul cookie device. Une mise à jour atomique conditionnée par `_id`, `isGuest`, version et hash empêche les doubles conversions et l'écrasement d'un compte permanent. Le même `_id`, la bio et tous les propriétaires sont conservés ; le username/displayName deviennent ceux soumis. L'unicité email/username reste imposée. Le hash device est supprimé et les anciennes sessions invitées invalidées par incrément de version. Le cookie device est effacé après succès. Un utilisateur permanent déjà connecté reçoit 409 s'il tente register.
+`POST /register` convertit uniquement l'invité de la **session authentifiée courante** (initialiser guest avant), jamais un invité indiqué par ID ou par le seul cookie device. Une mise à jour atomique conditionnée par `_id`, `isGuest`, version et hash empêche les doubles conversions et l'écrasement d'un compte permanent. Le même `_id`, la bio et tous les propriétaires sont conservés. Un nouveau compte envoie `username` et `password` : le nom affiché reprend le pseudo, ou le nom déjà choisi par l'invité. `email` et `displayName` restent acceptés pour les comptes qui les utilisaient déjà ; la confirmation email ne s'applique que si un email est fourni. L'unicité email/username reste imposée. Le lien de récupération est un secret affiché au propriétaire, pas une donnée publique. Le hash device est supprimé et les anciennes sessions invitées invalidées par incrément de version. Le cookie device est effacé après succès. Un utilisateur permanent déjà connecté reçoit 409 s'il tente register.
 
-Avec confirmation obligatoire, la conversion attend SMTP en production (lien de développement autorisé sans SMTP en `development`/`test`) : après succès, pas de session, connexion 403 tant que l'email n'est pas confirmé, puis login explicite ; les contenus restent privés et conservés. Une panne SMTP renvoie 503 et restaure l'identité invitée (même `_id`, hash device, version, username/displayName), sans supprimer l'utilisateur ou ses cours. La compensation est conditionnelle : elle ne remplace pas une confirmation/reset concurrent déjà effectué. DB et SMTP ne sont pas une transaction distribuée ; un arrêt brutal du processus ou une panne DB pendant la compensation nécessite une inspection opérateur, pas une suppression de données.
+Avec confirmation obligatoire et un email fourni, la conversion attend SMTP en production (lien de développement autorisé sans SMTP en `development`/`test`) : après succès, pas de session, connexion 403 tant que l'email n'est pas confirmé, puis login explicite ; les contenus restent privés et conservés. Une panne SMTP renvoie 503 et restaure l'identité invitée (même `_id`, hash device, version, username/displayName), sans supprimer l'utilisateur ou ses cours. La compensation est conditionnelle : elle ne remplace pas une confirmation/reset concurrent déjà effectué. DB et SMTP ne sont pas une transaction distribuée ; un arrêt brutal du processus ou une panne DB pendant la compensation nécessite une inspection opérateur, pas une suppression de données.
 
 La connexion à un **compte existant** remplace la session et efface le cookie device, **sans transfert ni fusion implicite** des contenus invités. Avertissement frontend avant login : « Se connecter à un compte existant ne transfère pas les cours de cet invité. Pour les conserver, créez un compte depuis ce profil. » Logout efface les deux cookies, même pour un compte permanent sur appareil partagé, mais ne supprime ni User ni contenu. Comme tout bearer cookie, une copie dérobée du cookie device reste sensible ; ne jamais la journaliser. La conversion révoque son hash en DB.
 
@@ -271,14 +274,14 @@ Validation des limites le 18 octobre 2026 : build backend réussi et **23 tests 
 | PUT `/publications/:id/like` | Auth : `{liked:boolean}` ; `{liked,likeCount}` ; idempotent |
 | GET `/saved` | Auth ; liste de decks publics actuels avec cardCount et owner, pas de copie |
 | PUT `/decks/:id/save` | Auth : `{saved:boolean}` ; `{saved}` ; public seulement, idempotent |
-| POST `/decks/:id/study-sessions` | Auth, deck accessible non vide ; `{cardsVisited,durationSeconds}` ; session directe |
+| POST `/decks/:id/study-sessions` | Auth, deck accessible non vide ; `{cardsVisited,durationSeconds,knownCount?,doubtCount?,unknownCount?}` ; la somme des repères ne dépasse pas `cardsVisited` ; session directe |
 | GET `/study-sessions` | Auth ; historique personnel paginé, référence deck non peuplée |
 | GET `/health` | `{status:"ok"}` |
 | GET `/ready` | 200 `{status:"ok",connected:true}` ou 503 `{status:"unavailable",connected:false}` |
 
 `popular` : total de likes décroissant, puis date décroissante et `_id` pour départager. Classement/recherche avant pagination. Recherche littérale insensible à la casse sur titre, description, username et displayName du créateur, jamais les cartes ni les contenus non publics. `liked` et `saved` valent false pour les visiteurs.
 
-`cardsVisited` : entier 1–100000 (les passages répétés sont permis, ce n'est pas un nombre de cartes distinctes) ; `durationSeconds` : entier 1–86400. L'historique ne peuple jamais le contenu d'un deck qui peut être devenu privé. Pas d'abonnements, commentaires, copie de sauvegarde ni algorithme de répétition espacée dans ce MVP.
+`cardsVisited` : entier 1–100000 (les passages répétés sont permis, ce n'est pas un nombre de cartes distinctes) ; `durationSeconds` : entier 1–86400. `knownCount`, `doubtCount` et `unknownCount` sont des entiers 0–100000, facultatifs, et leur somme ne peut pas dépasser `cardsVisited`. Le frontend en déduit un taux : connu vaut 1, le doute 0,5 et inconnu 0. Ce taux est une annotation de l'utilisateur, pas une maîtrise certifiée. L'historique ne peuple jamais le contenu d'un deck qui peut être devenu privé. Pas d'abonnements, commentaires, copie de sauvegarde ni algorithme de répétition espacée dans ce MVP.
 
 ## Architecture et garanties
 

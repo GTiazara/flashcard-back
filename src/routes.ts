@@ -281,7 +281,11 @@ export function apiRouter(config: Pick<Config, 'CARD_TEXT_MAX_LENGTH'>, execute:
     return { saved };
   }));
   router.post('/decks/:id/study-sessions', authenticated, mutation(async req => {
-    const input = z.object({ cardsVisited: z.number().int().min(1).max(100000), durationSeconds: z.number().int().min(1).max(86400) }).strict().parse(req.body);
+    const count = z.number().int().min(0).max(100000).optional();
+    const input = z.object({
+      cardsVisited: z.number().int().min(1).max(100000), durationSeconds: z.number().int().min(1).max(86400),
+      knownCount: count, doubtCount: count, unknownCount: count,
+    }).strict().refine(value => (value.knownCount ?? 0) + (value.doubtCount ?? 0) + (value.unknownCount ?? 0) <= value.cardsVisited, 'Les repères ne peuvent pas dépasser les cartes parcourues.').parse(req.body);
     const deck = await writableDeck(param(req), req.userId, false);
     if (!(await Card.exists({ deck: deck._id }))) throw new HttpError(400, 'Impossible de réviser un paquet vide.');
     await lockDeck(deck);

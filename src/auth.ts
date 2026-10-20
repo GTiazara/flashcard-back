@@ -43,8 +43,8 @@ function guestIdentity() {
 
 export async function identify(req: Request, _res: Response, next: NextFunction) {
   if (req.session.userId) {
-    const user = await User.findById(req.session.userId).select('+authVersion');
-    if (user && (user.isGuest || user.emailVerified) && user.authVersion === req.session.authVersion) req.userId = user.id;
+    const user = await User.findById(req.session.userId).select('+authVersion +email');
+    if (user && (user.isGuest || !user.email || user.emailVerified) && user.authVersion === req.session.authVersion) req.userId = user.id;
     else await new Promise<void>((resolve, reject) => req.session.regenerate(err => err ? reject(err) : resolve()));
   }
   next();
@@ -89,28 +89,35 @@ export function authRouter(config: Config) {
   });
   router.post('/register', async (req, res) => {
     const input = z.object({
-      email, password, username: z.string().regex(/^[a-z0-9_]{3,24}$/),
-      displayName: z.string().trim().min(1).max(80),
+      username: z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/),
+      password,
+      email: email.optional(),
+      displayName: z.string().trim().min(1).max(80).optional(),
     }).strict().parse(req.body);
     const previous = req.userId ? await User.findById(req.userId).select('+guestTokenHash +authVersion') : null;
     if (previous && !previous.isGuest) throw new HttpError(409, 'Déconnectez-vous avant de créer un autre compte.');
     const verificationToken = token();
+    const recoverySecret = token();
     const identity = {
       isGuest: false,
-      email: input.email, username: input.username, displayName: input.displayName,
+      username: input.username,
+      displayName: input.displayName ?? previous?.displayName ?? input.username,
       passwordHash: await bcrypt.hash(input.password, 12),
-      emailVerified: !config.REQUIRE_EMAIL_VERIFICATION,
-      ...(config.REQUIRE_EMAIL_VERIFICATION ? {
+      recoverySecret,
+      emailVerified: Boolean(input.email) && !config.REQUIRE_EMAIL_VERIFICATION,
+      ...(input.email ? { email: input.email } : {}),
+      ...(input.email && config.REQUIRE_EMAIL_VERIFICATION ? {
         verificationTokenHash: hash(verificationToken), verificationExpiresAt: new Date(Date.now() + 86400000),
       } : {}),
     };
     const user = previous
       ? await User.findOneAndUpdate({ _id: previous._id, isGuest: true, authVersion: previous.authVersion, guestTokenHash: previous.guestTokenHash }, {
-        $set: identity, $inc: { authVersion: 1 }, $unset: { guestTokenHash: 1, resetTokenHash: 1, resetExpiresAt: 1 },
+        $set: identity, $inc: { authVersion: 1 },
+        $unset: { guestTokenHash: 1, resetTokenHash: 1, resetExpiresAt: 1, ...(input.email ? {} : { email: 1, verificationTokenHash: 1, verificationExpiresAt: 1 }) },
       }, { new: true, runValidators: true }).select('+authVersion')
       : await User.create(identity);
     if (!user) throw new HttpError(409, 'Ce profil a déjà été converti. Reconnectez-vous.');
-    if (config.REQUIRE_EMAIL_VERIFICATION) {
+    if (input.email && config.REQUIRE_EMAIL_VERIFICATION) {
       let devVerificationUrl: string | undefined;
       try { devVerificationUrl = await sendToken(config, input.email, verificationToken, 'verification'); }
       catch {
@@ -119,7 +126,7 @@ export function authRouter(config: Config) {
           await User.updateOne({ _id: user._id, isGuest: false, emailVerified: false, authVersion: user.authVersion, verificationTokenHash: hash(verificationToken) }, {
             $set: { isGuest: true, username: previous.username, displayName: previous.displayName, emailVerified: false,
               authVersion: previous.authVersion, guestTokenHash: previous.guestTokenHash },
-            $unset: { email: 1, passwordHash: 1, verificationTokenHash: 1, verificationExpiresAt: 1 },
+            $unset: { email: 1, passwordHash: 1, verificationTokenHash: 1, verificationExpiresAt: 1, recoverySecret: 1 },
           });
         } else await User.deleteOne({ _id: user._id, emailVerified: false, verificationTokenHash: hash(verificationToken) });
         throw new HttpError(503, 'Email de confirmation indisponible. Réessayez plus tard.');
@@ -127,20 +134,24 @@ export function authRouter(config: Config) {
       if (previous) await new Promise<void>((resolve, reject) => req.session.destroy(err => err ? reject(err) : resolve()));
       if (previous || req.headers.cookie?.includes(`${guestCookieName}=`)) clearGuestCookie(res, config);
       if (previous) res.clearCookie('flashcard.sid', cookieOptions(config));
-      res.status(201).json({ requiresVerification: true, message: 'Confirmez votre adresse email avant de vous connecter.', ...(devVerificationUrl ? { devVerificationUrl } : {}) });
+      res.status(201).json({ requiresVerification: true, message: 'Confirmez votre adresse email avant de vous connecter.', recoveryUrl: recoveryUrl(config, recoverySecret), ...(devVerificationUrl ? { devVerificationUrl } : {}) });
     } else {
       await loginSession(req, user);
       if (previous || req.headers.cookie?.includes(`${guestCookieName}=`)) clearGuestCookie(res, config);
-      res.status(201).json(publicUser(user));
+      res.status(201).json({ ...publicUser(user), recoveryUrl: recoveryUrl(config, recoverySecret) });
     }
   });
   router.post('/login', async (req, res) => {
-    const input = z.object({ email, password: z.string().min(1).max(256) }).strict().parse(req.body);
-    const user = await User.findOne({ email: input.email, isGuest: { $ne: true } }).select('+passwordHash +authVersion');
-    // Un hash factice évite le chemin rapide pour les emails inconnus.
+    const input = z.object({
+      password: z.string().min(1).max(256),
+      email: email.optional(),
+      username: z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/).optional(),
+    }).strict().refine(value => Boolean(value.email) !== Boolean(value.username), 'Indiquez un pseudo ou un email.').parse(req.body);
+    const user = await User.findOne(input.email ? { email: input.email, isGuest: { $ne: true } } : { username: input.username, isGuest: { $ne: true } }).select('+passwordHash +authVersion +email');
+    // Un hash factice évite le chemin rapide pour les identifiants inconnus.
     const valid = await bcrypt.compare(input.password, user?.passwordHash ?? dummyHash);
-    if (!user || !valid) throw new HttpError(401, 'Email ou mot de passe incorrect.');
-    if (!user.emailVerified) throw new HttpError(403, 'Confirmez votre adresse email.');
+    if (!user || !valid) throw new HttpError(401, 'Pseudo, email ou mot de passe incorrect.');
+    if (user.email && !user.emailVerified) throw new HttpError(403, 'Confirmez votre adresse email.');
     await loginSession(req, user);
     clearGuestCookie(res, config);
     res.json(publicUser(user));
@@ -179,6 +190,29 @@ export function authRouter(config: Config) {
     if (req.session.userId) await new Promise<void>((resolve, reject) => req.session.destroy(err => err ? reject(err) : resolve()));
     res.json({ message: 'Mot de passe réinitialisé. Reconnectez-vous.' });
   });
+  router.get('/recovery', authenticated, async (req, res) => {
+    const user = await User.findById(req.userId).select('+recoverySecret +email');
+    if (!user || user.isGuest) throw new HttpError(404, 'Un profil temporaire n’a pas de lien de récupération.');
+    if (!user.recoverySecret) { user.recoverySecret = token(); await user.save(); }
+    res.json({ url: recoveryUrl(config, user.recoverySecret), hasEmail: Boolean(user.email) });
+  });
+  router.post('/recovery', authenticated, async (req, res) => {
+    z.object({}).strict().parse(req.body ?? {});
+    const secret = token();
+    const user = await User.findOneAndUpdate({ _id: req.userId, isGuest: { $ne: true } }, { $set: { recoverySecret: secret } }, { new: true }).select('+email');
+    if (!user) throw new HttpError(404, 'Un profil temporaire n’a pas de lien de récupération.');
+    res.json({ url: recoveryUrl(config, secret), hasEmail: Boolean(user.email) });
+  });
+  router.post('/recover', async (req, res) => {
+    const input = z.object({ token: tokenSchema, password }).strict().parse(req.body);
+    const passwordHash = await bcrypt.hash(input.password, 12);
+    const user = await User.findOneAndUpdate({ isGuest: { $ne: true }, recoverySecret: input.token }, {
+      $set: { passwordHash }, $inc: { authVersion: 1 },
+    });
+    if (!user) throw new HttpError(400, 'Lien de récupération invalide.');
+    if (req.session.userId) await new Promise<void>((resolve, reject) => req.session.destroy(err => err ? reject(err) : resolve()));
+    res.json({ message: `Mot de passe mis à jour. Reconnectez-vous avec le pseudo ${user.username}.`, username: user.username });
+  });
   router.post('/verify-email', async (req, res) => {
     const input = z.object({ token: tokenSchema }).strict().parse(req.body);
     const user = await User.findOneAndUpdate({ isGuest: { $ne: true }, verificationTokenHash: hash(input.token), verificationExpiresAt: { $gt: new Date() } }, {
@@ -191,3 +225,8 @@ export function authRouter(config: Config) {
 }
 
 const dummyHash = bcrypt.hashSync('not-a-user-password-2387', 12);
+function recoveryUrl(config: Config, secret: string) {
+  const url = new URL('/recover', config.FRONTEND_URL);
+  url.searchParams.set('token', secret);
+  return url.toString();
+}

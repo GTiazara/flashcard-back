@@ -6,8 +6,9 @@ const text = (max: number, required = false) => ({ type: String, trim: true, max
 function permanentIdentity(this: { isGuest?: boolean }) { return !this.isGuest; }
 const userSchema = new Schema({
   isGuest: { type: Boolean, default: false, required: true },
-  email: { ...text(254), required: permanentIdentity, lowercase: true, select: false },
+  email: { ...text(254), lowercase: true, select: false },
   passwordHash: { type: String, required: permanentIdentity, select: false },
+  recoverySecret: { type: String, select: false, match: /^[a-f0-9]{64}$/ },
   guestTokenHash: { type: String, select: false, unique: true, sparse: true },
   username: { ...text(24, true), match: /^[a-z0-9_]{3,24}$/, unique: true },
   displayName: text(80, true), bio: { ...text(1000), default: '' }, avatarUrl: { ...text(2048), default: '' },
@@ -70,6 +71,9 @@ export const StudySession = mongoose.model('StudySession', new Schema({
   user: ref('User'), deck: ref('Deck'),
   cardsVisited: { type: Number, required: true, min: 1, max: 100000, validate: Number.isInteger },
   durationSeconds: { type: Number, required: true, min: 1, max: 86400, validate: Number.isInteger },
+  knownCount: { type: Number, default: 0, min: 0, max: 100000, validate: Number.isInteger },
+  doubtCount: { type: Number, default: 0, min: 0, max: 100000, validate: Number.isInteger },
+  unknownCount: { type: Number, default: 0, min: 0, max: 100000, validate: Number.isInteger },
 }, { timestamps: true }));
 StudySession.schema.index({ user: 1, createdAt: -1 });
 export async function initializeIndexes() {
