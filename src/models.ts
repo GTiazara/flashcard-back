@@ -65,7 +65,7 @@ export const Publication = mongoose.model('Publication', publicationSchema);
 const likeSchema = new Schema({ user: ref('User'), publication: ref('Publication') }, { timestamps: true });
 likeSchema.index({ user: 1, publication: 1 }, { unique: true });
 export const Like = mongoose.model('Like', likeSchema);
-const savedSchema = new Schema({ user: ref('User'), deck: ref('Deck') }, { timestamps: true });
+const savedSchema = new Schema({ user: ref('User'), deck: ref('Deck'), staticSlug: { ...text(120), match: /^[a-z0-9]+(?:-[a-z0-9]+)*$/ } }, { timestamps: true });
 savedSchema.index({ user: 1, deck: 1 }, { unique: true });
 export const Saved = mongoose.model('Saved', savedSchema);
 export const StudySession = mongoose.model('StudySession', new Schema({

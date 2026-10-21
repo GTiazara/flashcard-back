@@ -1,4 +1,5 @@
 import { Router, type Request, type RequestHandler } from 'express';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { Types } from 'mongoose';
 import type { Config } from './config.js';
@@ -271,6 +272,18 @@ export function apiRouter(config: Pick<Config, 'CARD_TEXT_MAX_LENGTH'>, execute:
     ]);
     res.json(list(await views(saved.map(s => s.deck)), page, limit));
   });
+  router.get('/saved-static', authenticated, async (req, res) => {
+    const items = await Saved.find({ user: req.userId, staticSlug: { $type: 'string' } }).sort({ createdAt: -1, _id: -1 }).select('staticSlug -_id').lean();
+    res.json({ slugs: items.map(item => item.staticSlug) });
+  });
+  router.put('/saved-static/:slug', authenticated, mutation(async req => {
+    const slug = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(120).parse(req.params.slug);
+    const { saved } = z.object({ saved: z.boolean() }).strict().parse(req.body);
+    const syntheticDeckId = new Types.ObjectId(createHash('sha256').update(`static:${slug}`).digest('hex').slice(0, 24));
+    if (saved) await Saved.updateOne({ user: req.userId, deck: syntheticDeckId }, { $setOnInsert: { user: req.userId, deck: syntheticDeckId, staticSlug: slug } }, { upsert: true });
+    else await Saved.deleteOne({ user: req.userId, deck: syntheticDeckId, staticSlug: slug });
+    return { saved };
+  }));
   router.put('/decks/:id/save', authenticated, mutation(async req => {
     const { saved } = z.object({ saved: z.boolean() }).strict().parse(req.body);
     const deck = await writableDeck(param(req), req.userId, false);
