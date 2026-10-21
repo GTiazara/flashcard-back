@@ -48,8 +48,9 @@ export function createApp(config: Config, options: { transactions: boolean } = {
     standardHeaders: 'draft-8', legacyHeaders: false,
     message: { message: 'Trop de tentatives. Réessayez dans 15 minutes.' },
   });
-  app.use('/api/auth', (req, res, next) => req.method === 'POST' ? authLimiter(req, res, next) : next(), authRouter(config));
-  app.use('/api', apiRouter(config, createMutationExecutor(options.transactions)));
+  const execute = createMutationExecutor(options.transactions);
+  app.use('/api/auth', (req, res, next) => req.method === 'POST' ? authLimiter(req, res, next) : next(), authRouter(config, execute));
+  app.use('/api', apiRouter(config, execute));
   app.use((_req, _res) => { throw new HttpError(404, 'Route introuvable.'); });
   const errors: ErrorRequestHandler = (err: unknown, _req, res, _next) => {
     if (err instanceof ZodError) res.status(400).json({ message: 'Données invalides.', errors: err.issues.map(i => ({ path: i.path.join('.'), message: i.message })) });

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import mongoose, { Schema } from 'mongoose';
 import { CARD_TEXT_MAX_LENGTH } from './limits.js';
 
@@ -6,8 +7,9 @@ const text = (max: number, required = false) => ({ type: String, trim: true, max
 function permanentIdentity(this: { isGuest?: boolean }) { return !this.isGuest; }
 const userSchema = new Schema({
   isGuest: { type: Boolean, default: false, required: true },
-  email: { ...text(254), required: permanentIdentity, lowercase: true, select: false },
+  email: { ...text(254), lowercase: true, select: false },
   passwordHash: { type: String, required: permanentIdentity, select: false },
+  recoverySecretHash: { type: String, select: false, match: /^[a-f0-9]{64}$/ },
   guestTokenHash: { type: String, select: false, unique: true, sparse: true },
   username: { ...text(24, true), match: /^[a-z0-9_]{3,24}$/, unique: true },
   displayName: text(80, true), bio: { ...text(1000), default: '' }, avatarUrl: { ...text(2048), default: '' },
@@ -63,13 +65,16 @@ export const Publication = mongoose.model('Publication', publicationSchema);
 const likeSchema = new Schema({ user: ref('User'), publication: ref('Publication') }, { timestamps: true });
 likeSchema.index({ user: 1, publication: 1 }, { unique: true });
 export const Like = mongoose.model('Like', likeSchema);
-const savedSchema = new Schema({ user: ref('User'), deck: ref('Deck') }, { timestamps: true });
+const savedSchema = new Schema({ user: ref('User'), deck: ref('Deck'), staticSlug: { ...text(120), match: /^[a-z0-9]+(?:-[a-z0-9]+)*$/ } }, { timestamps: true });
 savedSchema.index({ user: 1, deck: 1 }, { unique: true });
 export const Saved = mongoose.model('Saved', savedSchema);
 export const StudySession = mongoose.model('StudySession', new Schema({
   user: ref('User'), deck: ref('Deck'),
   cardsVisited: { type: Number, required: true, min: 1, max: 100000, validate: Number.isInteger },
   durationSeconds: { type: Number, required: true, min: 1, max: 86400, validate: Number.isInteger },
+  knownCount: { type: Number, default: 0, min: 0, max: 100000, validate: Number.isInteger },
+  doubtCount: { type: Number, default: 0, min: 0, max: 100000, validate: Number.isInteger },
+  unknownCount: { type: Number, default: 0, min: 0, max: 100000, validate: Number.isInteger },
 }, { timestamps: true }));
 StudySession.schema.index({ user: 1, createdAt: -1 });
 export async function initializeIndexes() {
@@ -81,6 +86,14 @@ export async function initializeIndexes() {
     if (indexes.some(index => Object.keys(index.key).length === 1 && index.key.email === 1 && index.unique && !index.partialFilterExpression)) {
       throw Object.assign(new Error('Index email historique incompatible avec les invités : exécuter la migration email en maintenance (voir README). Aucun index supprimé.'), { code: 'LEGACY_EMAIL_INDEX' });
     }
+  }
+  const legacy = await User.collection.find({ recoverySecret: { $type: 'string' } }).project({ recoverySecret: 1 }).toArray();
+  for (const doc of legacy) {
+    if (typeof doc.recoverySecret !== 'string' || !/^[a-f0-9]{64}$/.test(doc.recoverySecret)) continue;
+    await User.collection.updateOne({ _id: doc._id, recoverySecret: doc.recoverySecret }, {
+      $set: { recoverySecretHash: createHash('sha256').update(doc.recoverySecret).digest('hex') },
+      $unset: { recoverySecret: '' },
+    });
   }
   await Promise.all(Object.values(mongoose.models).map(model => model.init()));
 }

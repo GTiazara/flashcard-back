@@ -40,7 +40,7 @@ async function publish(deckId: string, agent = alice) {
   return (await agent.post(`/api/decks/${deckId}/publish`).send({}).expect(200)).body._id as string;
 }
 function assertNoSecrets(value: unknown) {
-  for (const forbidden of ['guestTokenHash', 'passwordHash', 'resetTokenHash', 'verificationTokenHash', 'authVersion', '@example.com', 'emailVerified']) expect(JSON.stringify(value)).not.toContain(forbidden);
+  for (const forbidden of ['guestTokenHash', 'passwordHash', 'resetTokenHash', 'verificationTokenHash', 'recoverySecret', 'recoverySecretHash', 'authVersion', '@example.com', 'emailVerified']) expect(JSON.stringify(value)).not.toContain(forbidden);
 }
 beforeAll(async () => {
   // Version par défaut supportée par mongodb-memory-server sur Windows moderne (7.x).
@@ -252,8 +252,64 @@ describe('Identités invitées automatiques', () => {
     expect(permanent.headers['set-cookie']).toBeUndefined();
     const publicDeck = await deck(one, { visibility: 'unlisted' });
     expect((await request(service.app).get(`/api/decks/${publicDeck}`).expect(200)).body.owner.isGuest).toBe(true);
-    expect(new User({ username: 'missing', displayName: 'Invalide' }).validateSync()?.errors).toHaveProperty('email');
+    expect(new User({ username: 'missing', displayName: 'Invalide' }).validateSync()?.errors).not.toHaveProperty('email');
     expect(new User({ username: 'missing', displayName: 'Invalide' }).validateSync()?.errors).toHaveProperty('passwordHash');
+  });
+  it('crée un compte avec pseudo et mot de passe, récupère par le lien du profil, et laisse un compte email se connecter', async () => {
+    const created = await request(service.app).post('/api/auth/register').send({ username: 'neo', password }).expect(201);
+    expect(created.body).toMatchObject({ username: 'neo', displayName: 'neo', isGuest: false });
+    expect(created.body.recoveryUrl).toContain('/recover?token=');
+    assertNoSecrets({ ...created.body, recoveryUrl: undefined });
+    const agent = request.agent(service.app);
+    await agent.post('/api/auth/login').send({ username: 'neo', password }).expect(200);
+    const secret = new URL(created.body.recoveryUrl).searchParams.get('token')!;
+    expect(secret).toMatch(/^[a-f0-9]{64}$/);
+    const stored = await User.findOne({ username: 'neo' }).select('+recoverySecretHash');
+    expect(stored!.get('recoverySecretHash')).toBe(createHash('sha256').update(secret).digest('hex'));
+    expect(stored!.get('recoverySecretHash')).not.toBe(secret);
+    const link = await agent.get('/api/auth/recovery').expect(200);
+    expect(link.body).toEqual({ hasLink: true, hasEmail: false });
+    expect(JSON.stringify((await agent.get('/api/profiles/neo')).body)).not.toContain(secret);
+    await request(service.app).get('/api/auth/recovery').expect(401);
+    await request(service.app).post('/api/auth/recover').send({ token: secret, password: `${password}!` }).expect(200);
+    await agent.get('/api/auth/me').expect(401);
+    await agent.post('/api/auth/login').send({ username: 'NEO', password }).expect(401);
+    await agent.post('/api/auth/login').send({ username: 'neo', password: `${password}!` }).expect(200);
+    const rotated = await agent.post('/api/auth/recovery').send({}).expect(200);
+    expect(new URL(rotated.body.url).searchParams.get('token')).not.toBe(secret);
+    expect(rotated.body.url).not.toBe(created.body.recoveryUrl);
+    await request(service.app).post('/api/auth/recover').send({ token: secret, password }).expect(400);
+    await request(service.app).post('/api/auth/login').send({ email: 'alice@example.com', password }).expect(200);
+    expect((await alice.get('/api/auth/recovery')).body).toMatchObject({ hasEmail: true, hasLink: true });
+  });
+  it('supprime un compte permanent et son contenu seulement avec le mot de passe', async () => {
+    const agent = request.agent(service.app);
+    const created = await agent.post('/api/auth/register').send({ username: 'efface', password }).expect(201);
+    const deckId = await deck(agent);
+    await card(deckId, agent);
+    await agent.post('/api/courses').send({ title: 'Cours' }).expect(201);
+    await agent.post(`/api/decks/${deckId}/study-sessions`).send({ cardsVisited: 1, durationSeconds: 2 }).expect(201);
+    await agent.post('/api/auth/delete-account').send({ confirm: 'supprimer' }).expect(400);
+    await agent.post('/api/auth/delete-account').send({ confirm: 'supprimer', password: 'mauvais-mot-de' }).expect(400);
+    expect(await User.exists({ username: 'efface' })).toBeTruthy();
+    await agent.post('/api/auth/delete-account').send({ confirm: 'supprimer', password }).expect(204);
+    await agent.get('/api/auth/me').expect(401);
+    expect(await User.exists({ _id: created.body._id })).toBeNull();
+    expect(await Deck.countDocuments({ owner: created.body._id })).toBe(0);
+    expect(await Card.countDocuments({ owner: created.body._id })).toBe(0);
+    expect(await Course.countDocuments({ owner: created.body._id })).toBe(0);
+    expect(await StudySession.countDocuments({ user: created.body._id })).toBe(0);
+    await request(service.app).get('/api/profiles/efface').expect(404);
+  });
+  it('supprime un profil temporaire sans mot de passe', async () => {
+    const agent = request.agent(service.app);
+    const guest = await agent.post('/api/auth/guest').send({}).expect(200);
+    const deckId = await deck(agent);
+    await agent.post('/api/auth/delete-account').send({ confirm: 'non' }).expect(400);
+    await agent.post('/api/auth/delete-account').send({ confirm: 'supprimer' }).expect(204);
+    expect(await User.exists({ _id: guest.body._id })).toBeNull();
+    expect(await Deck.countDocuments({ _id: deckId })).toBe(0);
+    await agent.get('/api/auth/me').expect(401);
   });
   it('logout efface les deux cookies, conserve les contenus et ne reprend pas un ancien invité après login', async () => {
     const agent = request.agent(service.app);
@@ -343,9 +399,9 @@ describe('Identités invitées automatiques', () => {
     } finally { send.mockRestore(); }
     expect((await agent.get('/api/auth/me').expect(200)).body).toEqual(guest.body);
     await agent.get(`/api/decks/${id}`).expect(200);
-    const restored = await User.findById(guest.body._id).select('+guestTokenHash +authVersion +email +passwordHash +verificationTokenHash');
+    const restored = await User.findById(guest.body._id).select('+guestTokenHash +authVersion +email +passwordHash +verificationTokenHash +recoverySecretHash');
     expect(restored).toMatchObject({ isGuest: true, guestTokenHash: before!.guestTokenHash, authVersion: before!.authVersion });
-    for (const field of ['email', 'passwordHash', 'verificationTokenHash']) expect(restored!.get(field)).toBeUndefined();
+    for (const field of ['email', 'passwordHash', 'verificationTokenHash', 'recoverySecretHash']) expect(restored!.get(field)).toBeUndefined();
     expect((await request(service.app).post('/api/auth/guest').set('Cookie', deviceCookie(guest)).send({}).expect(200)).body._id).toBe(guest.body._id);
     await agent.post('/api/auth/register').send(credentials('smtp_guest')).expect(201);
   });
@@ -543,6 +599,14 @@ describe('CRUD, permissions et confidentialité', () => {
     expect(history.items[0].deck).toBe(id);
     expect(JSON.stringify(history)).not.toContain('Question');
     expect((await alice.get('/api/study-sessions')).body.items).toHaveLength(0);
+  });
+  it('enregistre les repères de révision sans dépasser les cartes parcourues', async () => {
+    const id = await deck();
+    await card(id);
+    const created = (await alice.post(`/api/decks/${id}/study-sessions`).send({ cardsVisited: 2, durationSeconds: 12, knownCount: 1, doubtCount: 1, unknownCount: 0 }).expect(201)).body;
+    expect(created).toMatchObject({ knownCount: 1, doubtCount: 1, unknownCount: 0 });
+    await alice.post(`/api/decks/${id}/study-sessions`).send({ cardsVisited: 1, durationSeconds: 12, knownCount: 2 }).expect(400);
+    expect((await alice.get('/api/study-sessions')).body.items[0]).toMatchObject({ knownCount: 1, doubtCount: 1 });
   });
 });
 
